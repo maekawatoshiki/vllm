@@ -2,7 +2,7 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal, Optional, Union, final
 
 import torch
 import torch.nn as nn
@@ -448,9 +448,11 @@ class ColumnParallelLinear(LinearBase):
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             final_shape = list(loaded_weight.shape)
             if output_dim is not None:
+                print(f"GGUF {param=}, {final_shape=}, {output_dim=}")
                 tp_size = get_tensor_model_parallel_world_size()
                 assert final_shape[output_dim] % tp_size == 0
                 final_shape[output_dim] = final_shape[output_dim] // tp_size
+            print(f"Materializing GGUF weight {param.name} with shape {final_shape}")
             param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         param_data = param.data

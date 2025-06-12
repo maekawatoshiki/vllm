@@ -110,13 +110,22 @@ def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
         return x @ qweight.T
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] == 1 and qweight_type in MMVQ_QUANT_TYPES:
+        print("MMVQ")
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     # Use MMQ Kernel if it's available (standard + k-quants)
     elif qweight_type in MMQ_QUANT_TYPES:
+        print("MMQ")
+        if len(qweight.shape) == 3:
+            qweight = qweight.view((qweight.shape[0] * qweight.shape[1], -1))
         y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     # If there is no available MMQ kernel, fallback to dequantize
     elif qweight_type in DEQUANT_TYPES:
+        print("DEQUANT")
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+        if len(qweight.shape) == 2:
+            pass
+        elif len(qweight.shape) == 3:
+            qweight = qweight.view((qweight.shape[0] * qweight.shape[1], -1))
         shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
         weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
         y = x @ weight.T
@@ -267,6 +276,7 @@ class GGUFLinearMethod(LinearMethodBase):
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
+            print(f"{x.shape=}, {qweight.shape=}")
             qweight_type = layer.qweight_type.weight_type
             out = _fuse_mul_mat(x, qweight, qweight_type)
         if bias is not None:

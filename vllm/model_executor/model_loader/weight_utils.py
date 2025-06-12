@@ -567,6 +567,9 @@ def gguf_quant_weights_iterator(
         if tensor.name in gguf_to_hf_name_map:
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
+            print(f"gguf name: {tensor.name}, "
+                  f"hf name: {name}, "
+                  f"weight type: {weight_type}")
 
             if weight_type.name != "F32":
                 weight_type_name = name.replace("weight", "qweight_type")

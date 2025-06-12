@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from datetime import datetime
 from itertools import product
 from types import SimpleNamespace
-from typing import Any, TypedDict
+from typing import Any, TypedDict, List
 
 import ray
 import torch

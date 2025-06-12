@@ -36,7 +36,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear, LinearBase,
                                                MergedColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -259,6 +259,21 @@ class DeepseekV2Attention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
+        # assert self.kv_lora_rank == 512
+        # assert self.num_heads == 128
+        # assert self.v_head_dim == 128
+        # self.k_proj = ColumnParallelLinear(
+        #     self.kv_lora_rank,
+        #     self.num_heads * self.qk_nope_head_dim,
+        #     bias=False,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.k_proj")
+        # self.v_proj = ColumnParallelLinear(
+        #     self.kv_lora_rank,
+        #     self.num_heads * self.v_head_dim,
+        #     bias=False,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.v_proj")
         # O projection.
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
@@ -313,6 +328,8 @@ class DeepseekV2Attention(nn.Module):
         kv = kv.view(-1, self.num_local_heads,
                      self.qk_nope_head_dim + self.v_head_dim)
         k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # k_nope = self.k_proj(kv_a)[0].view(-1, self.num_local_heads, self.qk_nope_head_dim) #16,32,128
+        # v = self.v_proj(kv_a)[0].view(-1, self.num_local_heads, self.v_head_dim)
         k_pe = latent_cache[:, :, self.kv_lora_rank:]
 
         q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
@@ -408,12 +425,36 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=f"{prefix}.kv_a_proj_with_mqa")
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        # self.kv_b_proj = ColumnParallelLinear(
+        #     self.kv_lora_rank,
+        #     self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        #     bias=False,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.kv_b_proj")
+        assert self.kv_lora_rank == 512
+        assert self.num_heads == 128
+        assert self.v_head_dim == 128
+        self.k_proj = ColumnParallelLinear(
+            # self.kv_lora_rank * self.num_heads,
+            # self.qk_nope_head_dim,
+            # self.qk_nope_head_dim * self.kv_lora_rank,
+            # self.num_heads,
+            self.qk_nope_head_dim,
+            self.kv_lora_rank * self.num_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
+            prefix=f"{prefix}.k_proj")
+        self.v_proj = ColumnParallelLinear(
+            # self.kv_lora_rank * self.num_heads,
+            # self.v_head_dim,
+            # self.kv_lora_rank * self.v_head_dim,
+            # self.num_heads,
+            self.kv_lora_rank,
+            self.v_head_dim * self.num_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.v_proj")
+
         self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                         self.hidden_size,
                                         bias=False,
@@ -456,7 +497,9 @@ class DeepseekV2MLAAttention(nn.Module):
             qk_rope_head_dim=self.qk_rope_head_dim,
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
-            kv_b_proj=self.kv_b_proj,
+            # kv_b_proj=self.kv_b_proj,
+            k_b_proj=self.k_proj,
+            v_b_proj=self.v_proj,
         )
 
         self.prefix = prefix
@@ -516,6 +559,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         if model_config.use_mla:
             attn_cls = DeepseekV2MLAAttention
         else:
+            pass
             attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(
             config=config,
@@ -756,6 +800,8 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            print(f"HERE {name} = {loaded_weight.shape}")
+
             if "rotary_emb.inv_freq" in name:
                 continue
 

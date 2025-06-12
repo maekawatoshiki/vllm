@@ -672,6 +672,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         return x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
+        assert False
 
         def get_layer_weight(layer):
             WEIGHT_NAMES = ("weight", "qweight", "weight_packed")

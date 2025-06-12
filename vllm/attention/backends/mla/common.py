@@ -1006,7 +1006,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
-        kv_b_proj: ColumnParallelLinear,
+        # kv_b_proj: ColumnParallelLinear,
+        k_b_proj: ColumnParallelLinear,
+        v_b_proj: ColumnParallelLinear,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -1020,7 +1022,9 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-        self.kv_b_proj = kv_b_proj
+        # self.kv_b_proj = kv_b_proj
+        self.k_b_proj = k_b_proj
+        self.v_b_proj = v_b_proj
 
         self.triton_fa_func = triton_attention
         # Handle the differences between the flash_attn_varlen from flash_attn
@@ -1126,6 +1130,8 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         def get_and_maybe_dequant_weights(layer: LinearBase):
             if not isinstance(layer.quant_method, UnquantizedLinearMethod):
                 # NOTE: This should only be used offline, since it's O(N^3)
+                print(f"{layer.quant_method=}, {layer.input_size_per_partition=}")
+                print(f"{get_layer_weight(layer).shape=}")
                 eye = torch.eye(layer.input_size_per_partition,
                                 dtype=act_dtype,
                                 device=get_layer_weight(layer).device)
@@ -1140,25 +1146,85 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         # we currently do not have quantized bmm's which are needed for
         # `W_UV` and `W_UK_T`, we we just store fp16/bf16 copies and perform
         # the bmm's in 16-bit, the extra memory overhead of this is fairly low
-        kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
-        assert kv_b_proj_weight.shape == (
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
-                f"{kv_b_proj_weight.shape=}, "
-                f"{self.kv_lora_rank=}, "
-                f"{self.num_heads=}, "
-                f"{self.qk_nope_head_dim=}, "
-                f"{self.v_head_dim=}")
-        kv_b_proj_weight = kv_b_proj_weight.view(
-            self.kv_lora_rank,
-            self.num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
+        if False:
+            kv_b_proj_weight = get_and_maybe_dequant_weights(self.kv_b_proj).T
+            print(f"{self.kv_b_proj.qweight.shape=}")
+            assert kv_b_proj_weight.shape == (
+                self.kv_lora_rank,
+                self.num_heads * (self.qk_nope_head_dim + self.v_head_dim)), (
+                    f"{kv_b_proj_weight.shape=}, "
+                    f"{self.kv_lora_rank=}, "
+                    f"{self.num_heads=}, "
+                    f"{self.qk_nope_head_dim=}, "
+                    f"{self.v_head_dim=}")
+            kv_b_proj_weight = kv_b_proj_weight.view(
+                self.kv_lora_rank,
+                self.num_heads,
+                self.qk_nope_head_dim + self.v_head_dim,
+            )
 
-        W_UK, W_UV = kv_b_proj_weight.split(
-            [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # we moved to the split k_b_proj and v_b_proj:
 
-        # Convert from (L, N, V) to (N, L, V)
+        # print(f"{self.k_b_proj.qweight.shape=}, {self.v_b_proj.qweight.shape=}")
+        # from vllm import _custom_ops as ops
+        # # ops.ggml_dequantize
+        # W_UK = ops.ggml_dequantize(
+        #  self.k_b_proj.qweight,
+        #  self.k_b_proj.qweight_type).T        # (512, 4096)
+        #
+        # W_UV = ops.dequantize_gguf_weight(
+        #     self.v_b_proj.qweight,
+        #     self.v_b_proj.qweight_type).T        # (512, 4096)
+        #
+        # num_heads_local = W_UK.shape[1] // self.qk_nope_head_dim   # 4096/128 = 32
+        #
+        # self.W_UK_T = W_UK.view(self.kv_lora_rank,         # 512
+        #                         num_heads_local,           # 32
+        #                         self.qk_nope_head_dim)     # 128
+        #                    .permute(1, 2, 0)               # (32,128,512)
+        #                    .contiguous()
+        #
+        # self.W_UV   = W_UV.view(self.kv_lora_rank,
+        #                         num_heads_local,
+        #                         self.v_head_dim)           # 128
+        #                    .transpose(0, 1)                # (32,512,128)
+        #                    .contiguous()
+ 
+        W_UV = get_and_maybe_dequant_weights(self.v_b_proj).T
+        print(f"{W_UV.shape=}")
+        # W_UV = W_UV.view(self.num_heads, self.v_head_dim, self.kv_lora_rank) \
+        #            .permute(2, 1, 0) \
+        #            .reshape(self.kv_lora_rank * self.v_head_dim, self.num_heads)
+        W_UV = W_UV.view(self.kv_lora_rank * self.v_head_dim, self.num_heads)
+        W_UK = get_and_maybe_dequant_weights(self.k_b_proj).T
+        print(f"{W_UK.shape=}")
+        # W_UK = W_UK.view(self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim) \
+        #            .permute(2, 1, 0) \
+        #            .reshape(self.qk_nope_head_dim * self.kv_lora_rank, self.num_heads)
+        W_UK = W_UK.view(self.qk_nope_head_dim * self.kv_lora_rank, self.num_heads)
+        print(f"{self.k_b_proj=}, {self.v_b_proj=}")
+        print(f"{W_UV.shape=}")
+        print(f"{W_UK.shape=}")
+        assert W_UK.shape == (self.kv_lora_rank * self.qk_nope_head_dim, self.num_heads), (
+            f"{W_UK.shape=}, {self.kv_lora_rank=}, {self.num_heads=}, {self.qk_nope_head_dim=}")
+        assert W_UV.shape == (self.kv_lora_rank * self.v_head_dim, self.num_heads)
+        W_UV = W_UV.view(self.kv_lora_rank, self.v_head_dim, self.num_heads)
+        W_UK = W_UK.view(self.qk_nope_head_dim, self.kv_lora_rank, self.num_heads)
+
+        # (L, V, N) -> (N, L, V)
+        self.W_UV = W_UV.permute(2, 0, 1)
+        # (L, P, N) -> (N, P, L)
+        # (P, L, N) -> (N, P, L)
+        self.W_UK_T = W_UK.permute(2, 0, 1)
+
+        return
+        # W_UV = W_UV.view(self.kv_lora_rank, self.num_heads, self.v_head_dim)
+        # W_UK = W_UK.view(self.kv_lora_rank, self.num_heads, self.qk_nope_head_dim)
+
+        # W_UK, W_UV = kv_b_proj_weight.split(
+        #     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        # Convert from (L, N, V) to (N, L, V) # num heads 128, lora rank 512, v head dim 128
         self.W_UV = W_UV.transpose(0, 1)
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0)
@@ -1169,6 +1235,7 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
     ):
+        assert False
         prefill_metadata = attn_metadata.prefill_metadata
         assert prefill_metadata is not None
         assert prefill_metadata.context_chunk_seq_tot is not None
@@ -1259,10 +1326,21 @@ class MLACommonImpl(MLAAttentionImpl[T], Generic[T]):
         has_context = prefill_metadata.context_lens_tensor is not None \
             and prefill_metadata.context_lens_tensor.max() > 0
 
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope\
-            .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
+        #     -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        # k_nope, v = kv_nope\
+        #     .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # use W_UK_T:
+        print(f"{kv_c_normed.shape=}, {self.W_UK_T.shape=}, {self.W_UV.shape=}")
+        # (2048, 512) x (512, 32, 128) -> (2048, 32, 128)
+        k_nope = (kv_c_normed @ self.W_UK_T.permute(2, 0, 1) \
+                .reshape((self.kv_lora_rank, -1))).view(-1, self.num_heads, self.qk_nope_head_dim)
+        # v = self._v_up_proj(kv_c_normed).view(-1, self.num_heads, self.v_head_dim) # (2048, 32, 128)
+        # (2048, 512) x (512,32*128) -> (2048, 32, 128)
+        v = (kv_c_normed @ self.W_UV.permute(1, 0, 2).reshape((self.kv_lora_rank, -1))).view(-1, self.num_heads, self.v_head_dim)
+        # v = (kv_c_normed @ self.W_UV.transpose(0, 1).reshape((self.kv_lora_rank, -1))).view(-1, self.num_heads, self.v_head_dim)
+        print(f"{k_nope.shape=}, {v.shape=}")
+        # v = (kv_c_normed @ self.W_UV).permute(1, 0, 2)
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 

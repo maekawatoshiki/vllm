@@ -63,6 +63,17 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = \
                         f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
 
+                gguf_to_hf_name_map[f"blk.{idx}.attn_k_b.weight"] = \
+                        f"model.layers.{idx}.self_attn.k_proj.weight"
+                gguf_to_hf_name_map[f"blk.{idx}.attn_v_b.weight"] = \
+                        f"model.layers.{idx}.self_attn.v_proj.weight"
+
+                # gguf_to_hf_name_map[f"blk.{idx}.attn_k_b.weight"] = \
+                #         f"model.layers.{idx}.attention.k_proj.bias"
+                # gguf_to_hf_name_map[f"blk.{idx}.attn_v_b.weight"] = \
+                #         f"model.layers.{idx}.attention.v_proj.bias"
+                # k_b = reader.get_tensor(f"blk.{idx}.attn_k_b.weight")
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:
@@ -106,6 +117,7 @@ class GGUFModelLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = initialize_model(vllm_config=vllm_config)
+            print(model)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
 
