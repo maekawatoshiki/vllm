@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test model set-up and weight loading for llmcompressor-quantized models.
 
 Run `pytest tests/quantization/test_compressed_tensors.py`.
@@ -13,6 +14,7 @@ from compressed_tensors.quantization import QuantizationType
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24, CompressedTensorsLinearMethod,
+    CompressedTensorsW4A4Fp4, CompressedTensorsW4A16Fp4,
     CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16)
@@ -261,16 +263,23 @@ def test_compressed_tensors_w8a8_dynamic_per_token(
 
 @pytest.mark.parametrize(
     "wNa16_args",
-    [
-        ("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8),
-        ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8),
-        ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4),
-    ],
+    [("nm-testing/tinyllama-oneshot-w4a16-channel-v2", "channel", None, 8,
+      True, False),
+     ("nm-testing/tinyllama-oneshot-w4a16-group128-v2", "group", 128, 8, True,
+      False),
+     ("nm-testing/tinyllama-oneshot-w8a16-per-channel", "channel", None, 4,
+      True, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-awq-group128-asym256", "group", 128,
+      8, False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-Channel",
+      "channel", None, 8, False, False),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-W4A16-G128-Asym-Updated-ActOrder",
+      "group", 128, 8, False, True)],
 )
 @pytest.mark.skipif(not current_platform.is_cuda(),
                     reason="The tests are skipped on non-CUDA platform.")
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
-    model, strategy, group, pack_factor = wNa16_args
+    model, strategy, group, pack_factor, symmetric, has_g_idx = wNa16_args
     with vllm_runner(model) as llm:
 
         def check_model(model):
@@ -286,6 +295,8 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
                                                   if group is None else group)
 
             assert qkv_proj.scheme.pack_factor == pack_factor
+            assert qkv_proj.scheme.symmetric == symmetric
+            assert qkv_proj.scheme.has_g_idx == has_g_idx
 
         llm.apply_model(check_model)
 
@@ -636,6 +647,30 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
 
         llm.apply_model(check_model)
 
+        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        print(output)
+        assert output
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16",
+      CompressedTensorsW4A16Fp4),
+     ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4)])
+def test_compressed_tensors_nvfp4(vllm_runner, args):
+    model, scheme = args
+    with vllm_runner(model, enforce_eager=True) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.quant_method,
+                              CompressedTensorsLinearMethod)
+            assert isinstance(qkv_proj.scheme, scheme)
+            assert qkv_proj.scheme.group_size == 16
+
+        llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
         assert output
